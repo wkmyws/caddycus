@@ -50,7 +50,7 @@ EXPOSE 80 443 443/udp 2019
 WORKDIR /srv
 
 # Switch to non-root user
-USER caddy
+# USER caddy
 
 # Default command
 CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
