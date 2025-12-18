@@ -1,0 +1,9 @@
+# Caddy 插件列表
+# 每行一个插件，支持以 # 开头的注释和空行
+# 修改后重新构建即可应用
+
+# Cloudflare DNS 验证
+github.com/caddy-dns/cloudflare
+
+# Cloudflare IP
+github.com/WeidiDeng/caddy-cloudflare-ip

@@ -1,0 +1,145 @@
+name: Build and Push Caddy Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: 'Caddy version to build (leave empty for latest)'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      caddy_version:
+        description: 'Caddy version to build'
+        required: false
+        type: string
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get Caddy version
+        id: version
+        run: |
+          if [ -n "${{ inputs.caddy_version }}" ]; then
+            VERSION="${{ inputs.caddy_version }}"
+          else
+            VERSION=$(curl -s "https://api.github.com/repos/caddyserver/caddy/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building Caddy version: $VERSION"
+          
+          # Generate fingerprint and plugin description for unique tagging
+          PLUGIN_VERSIONS=""
+          PLUGIN_DESC=""
+          while IFS= read -r plugin || [ -n "$plugin" ]; do
+            case "$plugin" in ""|"#"*) continue ;; esac
+            COMMIT_SHA=$(curl -s "https://api.github.com/repos/${plugin#github.com/}/commits/HEAD" | grep '"sha":' | head -1 | sed -E 's/.*"sha": *"([^"]+)".*/\1/' | cut -c1-7)
+            PLUGIN_VERSIONS="${PLUGIN_VERSIONS}${plugin}@${COMMIT_SHA}"$'\n'
+            PLUGIN_NAME=$(basename "$plugin")
+            PLUGIN_DESC="${PLUGIN_DESC}${PLUGIN_NAME}@${COMMIT_SHA}, "
+          done < plugins.txt
+          
+          # Remove trailing comma and space
+          PLUGIN_DESC="${PLUGIN_DESC%, }"
+          
+          FINGERPRINT=$(echo -e "caddy=${VERSION}\n${PLUGIN_VERSIONS}" | sha256sum | cut -c1-16)
+          echo "fingerprint=$FINGERPRINT" >> $GITHUB_OUTPUT
+          echo "plugin_desc=$PLUGIN_DESC" >> $GITHUB_OUTPUT
+          echo "Version fingerprint: $FINGERPRINT"
+          echo "Plugins: $PLUGIN_DESC"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        timeout-minutes: 5
+        continue-on-error: false
+
+      - name: Retry login if failed
+        if: failure()
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Dockerfile with version info
+        id: versioninfo
+        run: |
+          # Generate .cache-version content
+          echo "caddy@${{ steps.version.outputs.version }}" > .cache-version
+          while IFS= read -r plugin || [ -n "$plugin" ]; do
+            case "$plugin" in ""|"#"*) continue ;; esac
+            COMMIT_SHA=$(curl -s "https://api.github.com/repos/${plugin#github.com/}/commits/HEAD" | grep '"sha":' | head -1 | sed -E 's/.*"sha": *"([^"]+)".*/\1/' | cut -c1-7)
+            echo "${plugin}@${COMMIT_SHA}" >> .cache-version
+          done < plugins.txt
+          
+          # Create description with " | " separator for better readability
+          DESCRIPTION=$(cat .cache-version | tr '\n' '|' | sed 's/|$/ /' | sed 's/|/ | /g')
+          
+          echo "description=$DESCRIPTION" >> $GITHUB_OUTPUT
+          echo "Version info: $DESCRIPTION"
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.version }}-${{ steps.version.outputs.fingerprint }}
+            type=sha,prefix=
+          labels: |
+            org.opencontainers.image.title=Caddy with Custom Plugins
+            org.opencontainers.image.description=${{ steps.versioninfo.outputs.description }}
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}
+            caddy.version=${{ steps.version.outputs.version }}
+            caddy.fingerprint=${{ steps.version.outputs.fingerprint }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: |
+            index:org.opencontainers.image.description=${{ steps.versioninfo.outputs.description }}
+          build-args: |
+            CADDY_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Update version file
+        run: |
+          # .cache-version already generated in "Update Dockerfile" step
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .cache-version
+          git diff --staged --quiet || git commit -m "chore: update to caddy ${{ steps.version.outputs.version }} (fingerprint: ${{ steps.version.outputs.fingerprint }})"
+          git push

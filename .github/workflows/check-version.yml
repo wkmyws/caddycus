@@ -1,0 +1,40 @@
+name: Check Version
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for new Caddy version
+        id: check
+        run: |
+          chmod +x scripts/check-caddy-version.sh
+          ./scripts/check-caddy-version.sh
+
+      - name: Trigger build workflow
+        if: steps.check.outputs.new_version == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build.yml',
+              ref: 'main',
+              inputs: {
+                caddy_version: '${{ steps.check.outputs.version }}'
+              }
+            })
+            console.log('Triggered build for version: ${{ steps.check.outputs.version }}')
