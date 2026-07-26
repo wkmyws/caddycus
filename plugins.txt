@@ -7,3 +7,6 @@ github.com/caddy-dns/cloudflare
 
 # Cloudflare IP
 github.com/WeidiDeng/caddy-cloudflare-ip
+
+# sni分流
+github.com/mholt/caddy-l4
